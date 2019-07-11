@@ -1,0 +1,26 @@
+[package]
+name = "tokio-cache"
+version = "0.1.0"
+authors = ["Simon Génier <1782845+animalsiknow@users.noreply.github.com>"]
+edition = "2018"
+documentation = "https://docs.rs/crate/tokio-cache"
+repository = "https://github.com/animalsiknow/tokio-cache"
+description = "Non-blocking caches that can be used with Tokio."
+readme = "README.md"
+categories = ["asynchronous", "caching"]
+license = "MPL-2.0"
+
+[dependencies.arc-swap]
+version = "0.3.11"
+
+[dependencies.futures]
+version = "0.1.28"
+
+[dependencies.im]
+version = "13.0.0"
+
+[dependencies.state_machine_future]
+git = "https://github.com/fitzgen/state_machine_future"
+
+[dependencies.tokio-sync]
+version = "0.1.6"
