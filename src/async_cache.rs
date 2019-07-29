@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 use std::collections::hash_map::{self, HashMap};
+use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -12,13 +13,13 @@ use tokio_sync::watch;
 
 /// A cache where reads are wait-free and where writes are asynchronous, such as it can be used
 /// within code that cannot block.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AsyncCache<K, V>
 where
     K: Hash + Eq + Clone,
     V: Clone,
 {
-    entries: ArcSwap<im::HashMap<K, V>>,
+    entries: Arc<ArcSwap<im::HashMap<K, V>>>,
     pending_entries: Lock<HashMap<K, watch::Receiver<Option<V>>>>,
 }
 
@@ -28,8 +29,8 @@ where
     V: Clone,
 {
     pub fn new() -> Self {
-        Self {
-            entries: ArcSwap::new(Arc::new(im::HashMap::new())),
+        AsyncCache {
+            entries: Arc::new(ArcSwap::new(Arc::new(im::HashMap::new()))),
             pending_entries: Lock::new(HashMap::new()),
         }
     }
@@ -48,19 +49,33 @@ where
 
     /// Writes the result of the given `future` in the cache at entry `key`.
     ///
-    /// If multiple concurrent write on the same key are issued, only one of the futures will be
-    /// polled and the others will be dropped.
+    /// If multiple writes, concurrent or not, on the same key are issued, only one of the futures
+    /// will be polled and the others will be dropped.
     pub fn write<F>(&self, key: K, future: F) -> AsyncCacheWriteFuture<K, F>
     where
         F: Future<Item = V>,
     {
         let context = Context {
             key,
-            entries: self.entries.clone(),
+            entries: Arc::clone(&self.entries),
             pending_entries: self.pending_entries.clone(),
         };
         let inner = Machine::start(future, context);
         AsyncCacheWriteFuture { inner }
+    }
+}
+
+impl<K, V> Debug for AsyncCache<K, V>
+where
+    K: Hash + Eq + Clone + Debug,
+    V: Clone + Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut debug_map = f.debug_map();
+        for (k, v) in &*self.entries.load() {
+            debug_map.entry(&k, &v);
+        }
+        debug_map.finish()
     }
 }
 
@@ -98,7 +113,7 @@ where
     F::Item: Clone,
 {
     key: K,
-    entries: ArcSwap<im::HashMap<K, F::Item>>,
+    entries: Arc<ArcSwap<im::HashMap<K, F::Item>>>,
     pending_entries: Lock<HashMap<K, watch::Receiver<Option<F::Item>>>>,
 }
 
@@ -267,5 +282,35 @@ where
             }
             .into(),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::future::ok;
+    use tokio::runtime::Runtime;
+
+    use super::AsyncCache;
+
+    #[test]
+    fn insert_then_get_single_entry() {
+        let mut runtime = Runtime::new().unwrap();
+        let cache = AsyncCache::new();
+
+        assert_eq!(None, cache.read(&1));
+        assert_eq!(Ok(2), runtime.block_on(cache.write(1, ok::<_, ()>(2))));
+        assert_eq!(Some(2), cache.read(&1));
+    }
+
+    #[test]
+    fn writing_twice_does_not_override() {
+        let mut runtime = Runtime::new().unwrap();
+        let cache = AsyncCache::new();
+
+        assert_eq!(None, cache.read(&1));
+        assert_eq!(Ok(2), runtime.block_on(cache.write(1, ok::<_, ()>(2))));
+        assert_eq!(Some(2), cache.read(&1));
+        assert_eq!(Ok(2), runtime.block_on(cache.write(1, ok::<_, ()>(3))));
+        assert_eq!(Some(2), cache.read(&1));
     }
 }

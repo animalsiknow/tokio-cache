@@ -24,3 +24,6 @@ git = "https://github.com/fitzgen/state_machine_future"
 
 [dependencies.tokio-sync]
 version = "0.1.6"
+
+[dev-dependencies.tokio]
+version = "0.1"

@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use futures::future::Future;
-use futures::{Async, Poll, try_ready};
+use futures::{try_ready, Async, Poll};
 
 use crate::async_cache::{AsyncCache, AsyncCacheWriteFuture};
 
