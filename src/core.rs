@@ -73,6 +73,7 @@ where
         debug_map.finish()
     }
 }
+
 pub trait ExpireEntry<E> {
     fn is_fresh(&self, entry: &E) -> bool;
 }
