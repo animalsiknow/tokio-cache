@@ -5,7 +5,15 @@ use std::time::{Duration, Instant};
 use futures::future::Future;
 use futures::{try_ready, Async, Poll};
 
-use crate::async_cache::{AsyncCache, AsyncCacheWriteFuture};
+use crate::core::{CacheCore, ExpireEntry, MachineFuture};
+
+struct ExpiresAt;
+
+impl<V> ExpireEntry<ExpiringEntry<V>> for ExpiresAt {
+    fn is_fresh(&self, entry: &ExpiringEntry<V>) -> bool {
+        entry.is_fresh()
+    }
+}
 
 #[derive(Clone, Debug)]
 struct ExpiringEntry<T> {
@@ -37,7 +45,7 @@ where
     V: Clone,
 {
     time_to_live: Duration,
-    inner: AsyncCache<K, ExpiringEntry<V>>,
+    core: CacheCore<K, ExpiringEntry<V>>,
 }
 
 impl<K, V> TimedCache<K, V>
@@ -48,7 +56,7 @@ where
     pub fn new(time_to_live: Duration) -> Self {
         Self {
             time_to_live,
-            inner: AsyncCache::new(),
+            core: CacheCore::new(),
         }
     }
 
@@ -60,22 +68,22 @@ where
         BK: Hash + Eq + ?Sized,
         K: Borrow<BK>,
     {
-        self.inner
-            .read(key)
-            .filter(ExpiringEntry::is_fresh)
-            .map(|entry| entry.clone().into_entry())
+        self.core
+            .read(key, &ExpiresAt)
+            .map(ExpiringEntry::into_entry)
     }
 
     pub fn write<F>(&self, key: K, future: F) -> TimedCacheWriteFuture<K, F>
     where
         F: Future<Item = V>,
     {
-        let inner = self.inner.write(
+        let inner = self.core.write(
             key,
             SetupExpiryFuture {
                 inner: future,
                 time_to_live: self.time_to_live,
             },
+            ExpiresAt,
         );
         TimedCacheWriteFuture { inner }
     }
@@ -88,7 +96,7 @@ where
     F: Future,
     F::Item: Clone,
 {
-    inner: AsyncCacheWriteFuture<K, SetupExpiryFuture<F>>,
+    inner: MachineFuture<K, SetupExpiryFuture<F>, ExpiresAt>,
 }
 
 impl<K, F> Future for TimedCacheWriteFuture<K, F>
@@ -102,7 +110,7 @@ where
     type Error = F::Error;
 
     fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
-        let entry = try_ready!(self.inner.poll());
+        let (_, entry) = try_ready!(self.inner.poll());
         Ok(Async::Ready(entry.into_entry()))
     }
 }
