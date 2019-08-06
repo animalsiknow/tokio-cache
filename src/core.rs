@@ -40,7 +40,7 @@ where
         K: Borrow<BK>,
         E: ExpireEntry<V>,
     {
-        let lease = self.entries.lease();
+        let lease = self.entries.load();
         im::HashMap::get(&lease, key)
             .filter(|&entry| expire_entry.is_fresh(entry))
             .map(V::clone)
@@ -67,7 +67,7 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut debug_map = f.debug_map();
-        for (k, v) in &*self.entries.load() {
+        for (k, v) in &**self.entries.load() {
             debug_map.entry(&k, &v);
         }
         debug_map.finish()
@@ -165,7 +165,7 @@ where
 
             hash_map::Entry::Vacant(vacant) => {
                 {
-                    let entries_lease = context.core.entries.lease();
+                    let entries_lease = context.core.entries.load();
                     if let Some(value) = entries_lease.get(&context.key) {
                         if context.expire_entry.is_fresh(value) {
                             // Another task has already started and completed the computation
@@ -219,7 +219,7 @@ where
             };
 
             let mut entries = {
-                let lease = context.core.entries.lease();
+                let lease = context.core.entries.load();
                 im::HashMap::clone(&lease)
             };
             entries.insert(context.key.clone(), state.value.clone());
