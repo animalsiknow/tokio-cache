@@ -96,7 +96,7 @@ where
     {
         loop {
             match channel.recv().await {
-                Some(Some(v)) => return Some(v),
+                Some(Some(value)) => return Some(value),
                 Some(None) => (),
                 None => return None,
             }
@@ -131,8 +131,8 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut debug_map = f.debug_map();
-        for (k, v) in &**self.entries.load() {
-            debug_map.entry(&k, &v);
+        for (key, value) in &**self.entries.load() {
+            debug_map.entry(&key, &value);
         }
         debug_map.finish()
     }
