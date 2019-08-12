@@ -1,11 +1,9 @@
 use std::borrow::Borrow;
 use std::fmt::{self, Debug};
+use std::future::Future;
 use std::hash::Hash;
 
-use futures::future::Future;
-use futures::{try_ready, Async, Poll};
-
-use crate::core::{CacheCore, ExpireEntry, MachineFuture};
+use crate::core::{CacheCore, ExpireEntry};
 
 struct Never;
 
@@ -52,12 +50,11 @@ where
     ///
     /// If multiple writes, concurrent or not, on the same key are issued, only one of the futures
     /// will be polled and the others will be dropped.
-    pub fn write<F>(&self, key: K, future: F) -> AsyncCacheWriteFuture<K, F>
+    pub async fn write<F, E>(&self, key: K, future: F) -> Result<V, E>
     where
-        F: Future<Item = V>,
+        F: Future<Output = Result<V, E>>,
     {
-        let inner = self.core.write(key, future, Never);
-        AsyncCacheWriteFuture { inner }
+        self.core.write(key, future, &Never).await
     }
 }
 
@@ -73,59 +70,37 @@ where
     }
 }
 
-/// A future that will write a cache entry when polled to completion.
-#[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct AsyncCacheWriteFuture<K, F>
+impl<K, V> Default for AsyncCache<K, V>
 where
-    K: Hash + Eq + Clone,
-    F: Future,
-    F::Item: Clone,
+    K: Hash + Eq + Clone + Debug,
+    V: Clone + Debug,
 {
-    inner: MachineFuture<K, F, Never>,
-}
-
-impl<K, F> Future for AsyncCacheWriteFuture<K, F>
-where
-    K: Hash + Eq + Clone,
-    F: Future,
-    F::Item: Clone,
-{
-    type Item = F::Item;
-
-    type Error = F::Error;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        let (_, value) = try_ready!(self.inner.poll());
-        Ok(Async::Ready(value))
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use futures::future::ok;
-    use tokio::runtime::Runtime;
-
     use super::AsyncCache;
 
-    #[test]
-    fn insert_then_get_single_entry() {
-        let mut runtime = Runtime::new().unwrap();
+    #[tokio::test]
+    async fn insert_then_get_single_entry() {
         let cache = AsyncCache::new();
 
         assert_eq!(None, cache.read(&1));
-        assert_eq!(Ok(2), runtime.block_on(cache.write(1, ok::<_, ()>(2))));
+        assert_eq!(Ok(2), cache.write(1, async { Result::<_, ()>::Ok(2) }).await);
         assert_eq!(Some(2), cache.read(&1));
     }
 
-    #[test]
-    fn writing_twice_does_not_override() {
-        let mut runtime = Runtime::new().unwrap();
+    #[tokio::test]
+    async fn writing_twice_does_not_override() {
         let cache = AsyncCache::new();
 
         assert_eq!(None, cache.read(&1));
-        assert_eq!(Ok(2), runtime.block_on(cache.write(1, ok::<_, ()>(2))));
+        assert_eq!(Ok(2), cache.write(1, async { Result::<_, ()>::Ok(2) }).await);
         assert_eq!(Some(2), cache.read(&1));
-        assert_eq!(Ok(2), runtime.block_on(cache.write(1, ok::<_, ()>(3))));
+        assert_eq!(Ok(2), cache.write(1, async { Result::<_, ()>::Ok(3) }).await);
         assert_eq!(Some(2), cache.read(&1));
     }
 }

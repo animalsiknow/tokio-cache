@@ -1,11 +1,9 @@
 use std::borrow::Borrow;
+use std::future::Future;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
-use futures::future::Future;
-use futures::{try_ready, Async, Poll};
-
-use crate::core::{CacheCore, ExpireEntry, MachineFuture};
+use crate::core::{CacheCore, ExpireEntry};
 
 struct ExpiresAt;
 
@@ -73,69 +71,22 @@ where
             .map(ExpiringEntry::into_entry)
     }
 
-    pub fn write<F>(&self, key: K, future: F) -> TimedCacheWriteFuture<K, F>
+    pub async fn write<F, E>(&self, key: K, future: F) -> Result<V, E>
     where
-        F: Future<Item = V>,
+        F: Future<Output = Result<V, E>>,
     {
-        let inner = self.core.write(
-            key,
-            SetupExpiryFuture {
-                inner: future,
-                time_to_live: self.time_to_live,
-            },
-            ExpiresAt,
-        );
-        TimedCacheWriteFuture { inner }
-    }
-}
-
-#[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct TimedCacheWriteFuture<K, F>
-where
-    K: Hash + Eq + Clone,
-    F: Future,
-    F::Item: Clone,
-{
-    inner: MachineFuture<K, SetupExpiryFuture<F>, ExpiresAt>,
-}
-
-impl<K, F> Future for TimedCacheWriteFuture<K, F>
-where
-    K: Hash + Eq + Clone,
-    F: Future,
-    F::Item: Clone,
-{
-    type Item = F::Item;
-
-    type Error = F::Error;
-
-    fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
-        let (_, entry) = try_ready!(self.inner.poll());
-        Ok(Async::Ready(entry.into_entry()))
-    }
-}
-
-#[must_use = "futures do nothing unless you `.await` or poll them"]
-struct SetupExpiryFuture<F>
-where
-    F: Future,
-    F::Item: Clone,
-{
-    inner: F,
-    time_to_live: Duration,
-}
-
-impl<F> Future for SetupExpiryFuture<F>
-where
-    F: Future,
-    F::Item: Clone,
-{
-    type Item = ExpiringEntry<F::Item>;
-
-    type Error = F::Error;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        let value = try_ready!(self.inner.poll());
-        Ok(Async::Ready(ExpiringEntry::fresh(value, self.time_to_live)))
+        let time_to_live = self.time_to_live;
+        let entry = self
+            .core
+            .write(
+                key,
+                async move {
+                    let value = future.await?;
+                    Ok(ExpiringEntry::fresh(value, time_to_live))
+                },
+                &ExpiresAt,
+            )
+            .await?;
+        Ok(entry.into_entry())
     }
 }

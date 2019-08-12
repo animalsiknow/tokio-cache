@@ -1,6 +1,8 @@
+#![feature(async_await)]
+
 mod async_cache;
 mod core;
 mod timed_cache;
 
-pub use async_cache::{AsyncCache, AsyncCacheWriteFuture};
-pub use timed_cache::{TimedCache, TimedCacheWriteFuture};
+pub use async_cache::AsyncCache;
+pub use timed_cache::TimedCache;

@@ -1,6 +1,6 @@
 [package]
 name = "tokio-cache"
-version = "0.1.3"
+version = "0.2.0-alpha.0"
 authors = ["Simon Génier <1782845+animalsiknow@users.noreply.github.com>"]
 edition = "2018"
 documentation = "https://docs.rs/crate/tokio-cache"
@@ -13,17 +13,11 @@ license = "MPL-2.0"
 [dependencies.arc-swap]
 version = "0.4"
 
-[dependencies.futures]
-version = "0.1"
-
 [dependencies.im]
 version = "13.0"
 
-[dependencies.state_machine_future]
-git = "https://github.com/fitzgen/state_machine_future"
-
 [dependencies.tokio-sync]
-version = "0.1"
+version = "0.2.0-alpha.1"
 
 [dev-dependencies.tokio]
-version = "0.1"
+version = "0.2.0-alpha.1"

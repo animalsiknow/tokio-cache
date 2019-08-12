@@ -1,16 +1,14 @@
 use std::borrow::Borrow;
 use std::collections::hash_map::{self, HashMap};
 use std::fmt::{self, Debug};
+use std::future::Future;
 use std::hash::Hash;
-use std::marker::PhantomData;
+use std::mem;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use futures::future::Future;
-use futures::{try_ready, Async, Poll};
-use state_machine_future::{RentToOwn, StateMachineFuture};
-use tokio_sync::lock::Lock;
 use tokio_sync::watch;
+use tokio_sync::Lock;
 
 #[derive(Clone)]
 pub struct CacheCore<K, V>
@@ -46,17 +44,83 @@ where
             .map(V::clone)
     }
 
-    pub fn write<F, E>(&self, key: K, future: F, expire_entry: E) -> MachineFuture<K, F, E>
+    pub async fn write<F, X, E>(&self, key: K, future: F, expire_entry: &X) -> Result<V, E>
     where
-        F: Future<Item = V>,
-        E: ExpireEntry<V>,
+        F: Future<Output = Result<V, E>>,
+        X: ExpireEntry<V>,
     {
-        let context = Context {
-            key,
-            core: self.clone(),
-            expire_entry,
+        loop {
+            let mut pending_entries = self.pending_entries.clone();
+            let mut guard = pending_entries.lock().await;
+
+            match guard.entry(key.clone()) {
+                hash_map::Entry::Occupied(occupied) => {
+                    // Another task has already started the computation, wait on the watch for the
+                    // entry to be ready.
+                    if let Some(v) = self.wait_on_other_computation(occupied.get().clone()).await {
+                        // The task on which we were waiting succeeded.
+                        return Ok(v);
+                    }
+                }
+
+                hash_map::Entry::Vacant(vacant) => {
+                    {
+                        let entries_lease = self.entries.load();
+                        if let Some(value) = entries_lease.get(&key) {
+                            if expire_entry.is_fresh(value) {
+                                // Another task has already started and completed the computation
+                                // Return the result right away.
+                                return Ok(V::clone(value));
+                            }
+                        }
+                    }
+
+                    // This task "won" the race to populate the entry. Setup a watch on which other
+                    // tasks can wait.
+                    let (sender, receiver) = watch::channel(None);
+                    vacant.insert(receiver);
+                    mem::drop(guard);
+
+                    let v = future.await?;
+                    self.update_store(pending_entries, sender, key, v.clone())
+                        .await;
+                    return Ok(v);
+                }
+            }
+        }
+    }
+
+    async fn wait_on_other_computation(&self, mut channel: watch::Receiver<Option<V>>) -> Option<V>
+    where
+        V: Clone,
+    {
+        loop {
+            match channel.recv().await {
+                Some(Some(v)) => return Some(v),
+                Some(None) => (),
+                None => return None,
+            }
+        }
+    }
+
+    async fn update_store(
+        &self,
+        mut pending_entries: Lock<HashMap<K, watch::Receiver<Option<V>>>>,
+        sender: watch::Sender<Option<V>>,
+        key: K,
+        value: V,
+    ) {
+        let mut guard = pending_entries.lock().await;
+        guard.remove(&key);
+
+        let mut entries = {
+            let entries = self.entries.load();
+            im::HashMap::clone(&entries)
         };
-        Machine::start(future, PhantomData, context)
+        entries.insert(key, value.clone());
+        self.entries.store(Arc::new(entries));
+
+        let _ = sender.broadcast(Some(value));
     }
 }
 
@@ -78,199 +142,8 @@ pub trait ExpireEntry<E> {
     fn is_fresh(&self, entry: &E) -> bool;
 }
 
-pub struct Context<K, F, E>
-where
-    K: Hash + Eq + Clone,
-    F: Future,
-    F::Item: Clone,
-    E: ExpireEntry<F::Item>,
-{
-    key: K,
-    core: CacheCore<K, F::Item>,
-    expire_entry: E,
-}
-
-#[derive(StateMachineFuture)]
-#[state_machine_future(context = "Context")]
-pub enum Machine<K, F, E>
-where
-    K: Hash + Eq + Clone,
-    F: Future,
-    F::Item: Clone,
-    E: ExpireEntry<F::Item>,
-{
-    #[state_machine_future(
-        start,
-        transitions(WaitingForComputation, WaitingForOtherComputation, Ready)
-    )]
-    WaitingForLock {
-        future: F,
-        not_expire_entry: PhantomData<E>,
-    },
-
-    #[state_machine_future(transitions(WaitingToBroadcast))]
-    WaitingForComputation {
-        channel: watch::Sender<Option<F::Item>>,
-        future: F,
-    },
-
-    #[state_machine_future(transitions(Ready))]
-    WaitingToBroadcast {
-        channel: watch::Sender<Option<F::Item>>,
-        value: F::Item,
-    },
-
-    #[state_machine_future(transitions(WaitingForLock, Ready))]
-    WaitingForOtherComputation {
-        channel: watch::Receiver<Option<F::Item>>,
-        future: F,
-    },
-
-    #[state_machine_future(error)]
-    Failed(F::Error),
-
-    #[state_machine_future(ready)]
-    Ready((K, F::Item)),
-}
-
-impl<K, F, E> PollMachine<K, F, E> for Machine<K, F, E>
-where
-    K: Hash + Eq + Clone,
-    F: Future,
-    F::Item: Clone,
-    E: ExpireEntry<F::Item>,
-{
-    fn poll_waiting_for_lock<'state, 'context>(
-        state: &'state mut RentToOwn<'state, WaitingForLock<F, E>>,
-        context: &'context mut RentToOwn<'context, Context<K, F, E>>,
-    ) -> Poll<AfterWaitingForLock<K, F>, F::Error> {
-        let mut guard = match context.core.pending_entries.poll_lock() {
-            Async::Ready(guard) => guard,
-            Async::NotReady => return Ok(Async::NotReady),
-        };
-
-        match guard.entry(context.key.clone()) {
-            hash_map::Entry::Occupied(occupied) => {
-                // Another task has already started the computation, wait on the watch for the entry
-                // to be ready.
-                let channel = occupied.get().clone();
-                Ok(Async::Ready(
-                    WaitingForOtherComputation {
-                        future: state.take().future,
-                        channel,
-                    }
-                    .into(),
-                ))
-            }
-
-            hash_map::Entry::Vacant(vacant) => {
-                {
-                    let entries_lease = context.core.entries.load();
-                    if let Some(value) = entries_lease.get(&context.key) {
-                        if context.expire_entry.is_fresh(value) {
-                            // Another task has already started and completed the computation
-                            // Return the result right away.
-                            return Ok(Async::Ready(
-                                Ready((context.take().key, value.clone())).into(),
-                            ));
-                        }
-                    }
-                }
-
-                // This task "won" the race to populate the entry. Setup a watch on which other
-                // tasks can wait.
-                let (sender, receiver) = watch::channel(None);
-                vacant.insert(receiver);
-
-                Ok(Async::Ready(
-                    WaitingForComputation {
-                        channel: sender,
-                        future: state.take().future,
-                    }
-                    .into(),
-                ))
-            }
-        }
-    }
-
-    fn poll_waiting_for_computation<'state, 'context>(
-        state: &'state mut RentToOwn<'state, WaitingForComputation<F>>,
-        _context: &'context mut RentToOwn<'context, Context<K, F, E>>,
-    ) -> Poll<AfterWaitingForComputation<F>, F::Error> {
-        let value = try_ready!(state.future.poll());
-
-        Ok(Async::Ready(
-            WaitingToBroadcast {
-                channel: state.take().channel,
-                value,
-            }
-            .into(),
-        ))
-    }
-
-    fn poll_waiting_to_broadcast<'state, 'context>(
-        state: &'state mut RentToOwn<'state, WaitingToBroadcast<F>>,
-        context: &'context mut RentToOwn<'context, Context<K, F, E>>,
-    ) -> Poll<AfterWaitingToBroadcast<K, F>, F::Error> {
-        {
-            let mut guard = match context.core.pending_entries.poll_lock() {
-                Async::Ready(guard) => guard,
-                Async::NotReady => return Ok(Async::NotReady),
-            };
-
-            let mut entries = {
-                let lease = context.core.entries.load();
-                im::HashMap::clone(&lease)
-            };
-            entries.insert(context.key.clone(), state.value.clone());
-            context.core.entries.store(Arc::new(entries));
-
-            guard.remove(&context.key);
-        }
-
-        let mut state = state.take();
-        let context = context.take();
-        let _ = state.channel.broadcast(Some(state.value.clone()));
-        Ok(Async::Ready(Ready((context.key, state.value)).into()))
-    }
-
-    fn poll_waiting_for_other_computation<'state, 'context>(
-        state: &'state mut RentToOwn<'state, WaitingForOtherComputation<F>>,
-        context: &'context mut RentToOwn<'context, Context<K, F, E>>,
-    ) -> Poll<AfterWaitingForOtherComputation<K, F, E>, F::Error> {
-        loop {
-            match state.channel.poll_ref() {
-                Err(_) => unreachable!(),
-                Ok(Async::NotReady) => return Ok(Async::NotReady),
-                Ok(Async::Ready(None)) => {
-                    break;
-                }
-                Ok(Async::Ready(Some(r#ref))) => {
-                    if let Some(value) = &*r#ref {
-                        return Ok(Async::Ready(
-                            Ready((context.take().key, value.clone())).into(),
-                        ));
-                    }
-                }
-            }
-        }
-
-        // The process that was populating the entry has failed. Start from the beginning.
-        return Ok(Async::Ready(
-            WaitingForLock {
-                future: state.take().future,
-                not_expire_entry: PhantomData,
-            }
-            .into(),
-        ));
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use futures::future::ok;
-    use tokio::runtime::Runtime;
-
     use super::{CacheCore, ExpireEntry};
 
     struct Never;
@@ -289,31 +162,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fetch_an_expired_entry() {
-        let mut runtime = Runtime::new().unwrap();
+    #[tokio::test]
+    async fn fetch_an_expired_entry() {
         let cache = CacheCore::new();
 
         assert_eq!(
-            Ok((1, 2)),
-            runtime.block_on(cache.write(1, ok::<_, ()>(2), Never))
+            Ok(2),
+            cache
+                .write(1, async { Result::<_, ()>::Ok(2) }, &Never)
+                .await,
         );
         assert_eq!(Some(2), cache.read(&1, &Never));
         assert_eq!(None, cache.read(&1, &Always));
     }
 
-    #[test]
-    fn overwrite_an_expired_entry() {
-        let mut runtime = Runtime::new().unwrap();
-        let cache = CacheCore::new();
+    #[tokio::test]
+    async fn overwrite_an_expired_entry() {
+        let cache = CacheCore::<i32, i32>::new();
 
         assert_eq!(
-            Ok((1, 2)),
-            runtime.block_on(cache.write(1, ok::<_, ()>(2), Never))
+            Ok(2),
+            cache
+                .write(1, async { Result::<_, ()>::Ok(2) }, &Never)
+                .await,
         );
         assert_eq!(
-            Ok((1, 3)),
-            runtime.block_on(cache.write(1, ok::<_, ()>(3), Always))
+            Ok(3),
+            cache
+                .write(1, async { Result::<_, ()>::Ok(3) }, &Always)
+                .await,
         );
         assert_eq!(Some(3), cache.read(&1, &Never));
     }
