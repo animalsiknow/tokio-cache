@@ -17,7 +17,7 @@ version = "0.4"
 version = "13.0"
 
 [dependencies.tokio-sync]
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.4"
 
 [dev-dependencies.tokio]
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.4"
