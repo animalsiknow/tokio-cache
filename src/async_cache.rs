@@ -54,6 +54,10 @@ where
     where
         F: Future<Output = Result<V, E>>,
     {
+        if let Some(value) = self.read(&key) {
+            return Ok(value)
+        }
+
         self.core.write(key, future, &Never).await
     }
 }
@@ -89,7 +93,10 @@ mod tests {
         let cache = AsyncCache::new();
 
         assert_eq!(None, cache.read(&1));
-        assert_eq!(Ok(2), cache.write(1, async { Result::<_, ()>::Ok(2) }).await);
+        assert_eq!(
+            Ok(2),
+            cache.write(1, async { Result::<_, ()>::Ok(2) }).await
+        );
         assert_eq!(Some(2), cache.read(&1));
     }
 
@@ -98,9 +105,15 @@ mod tests {
         let cache = AsyncCache::new();
 
         assert_eq!(None, cache.read(&1));
-        assert_eq!(Ok(2), cache.write(1, async { Result::<_, ()>::Ok(2) }).await);
+        assert_eq!(
+            Ok(2),
+            cache.write(1, async { Result::<_, ()>::Ok(2) }).await
+        );
         assert_eq!(Some(2), cache.read(&1));
-        assert_eq!(Ok(2), cache.write(1, async { Result::<_, ()>::Ok(3) }).await);
+        assert_eq!(
+            Ok(2),
+            cache.write(1, async { Result::<_, ()>::Ok(3) }).await
+        );
         assert_eq!(Some(2), cache.read(&1));
     }
 }
