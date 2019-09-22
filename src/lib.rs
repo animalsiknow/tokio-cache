@@ -1,5 +1,3 @@
-#![feature(async_await)]
-
 mod async_cache;
 mod core;
 mod timed_cache;

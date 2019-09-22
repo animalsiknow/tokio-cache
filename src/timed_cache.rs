@@ -1,6 +1,7 @@
 use std::borrow::Borrow;
 use std::future::Future;
 use std::hash::Hash;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::core::{CacheCore, ExpireEntry};
@@ -43,7 +44,7 @@ where
     V: Clone,
 {
     time_to_live: Duration,
-    core: CacheCore<K, ExpiringEntry<V>>,
+    core: Arc<CacheCore<K, ExpiringEntry<V>>>,
 }
 
 impl<K, V> TimedCache<K, V>
@@ -54,7 +55,7 @@ where
     pub fn new(time_to_live: Duration) -> Self {
         Self {
             time_to_live,
-            core: CacheCore::new(),
+            core: Arc::new(CacheCore::new()),
         }
     }
 

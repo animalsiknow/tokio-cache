@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 use std::fmt::{self, Debug};
 use std::future::Future;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use crate::core::{CacheCore, ExpireEntry};
 
@@ -21,7 +22,7 @@ where
     K: Hash + Eq + Clone,
     V: Clone,
 {
-    core: CacheCore<K, V>,
+    core: Arc<CacheCore<K, V>>,
 }
 
 impl<K, V> AsyncCache<K, V>
@@ -31,7 +32,7 @@ where
 {
     pub fn new() -> Self {
         AsyncCache {
-            core: CacheCore::new(),
+            core: Arc::new(CacheCore::new()),
         }
     }
 

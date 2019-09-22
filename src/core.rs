@@ -7,17 +7,15 @@ use std::mem;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use tokio_sync::watch;
-use tokio_sync::Lock;
+use tokio_sync::{watch, Mutex};
 
-#[derive(Clone)]
 pub struct CacheCore<K, V>
 where
     K: Hash + Eq + Clone,
     V: Clone,
 {
-    entries: Arc<ArcSwap<im::HashMap<K, V>>>,
-    pending_entries: Lock<HashMap<K, watch::Receiver<Option<V>>>>,
+    entries: ArcSwap<im::HashMap<K, V>>,
+    pending_entries: Mutex<HashMap<K, watch::Receiver<Option<V>>>>,
 }
 
 impl<K, V> CacheCore<K, V>
@@ -27,8 +25,8 @@ where
 {
     pub fn new() -> Self {
         Self {
-            entries: Arc::new(ArcSwap::new(Arc::new(im::HashMap::new()))),
-            pending_entries: Lock::new(HashMap::new()),
+            entries: ArcSwap::new(Arc::new(im::HashMap::new())),
+            pending_entries: Mutex::new(HashMap::new()),
         }
     }
 
@@ -50,8 +48,7 @@ where
         X: ExpireEntry<V>,
     {
         loop {
-            let mut pending_entries = self.pending_entries.clone();
-            let mut guard = pending_entries.lock().await;
+            let mut guard = self.pending_entries.lock().await;
 
             match guard.entry(key.clone()) {
                 hash_map::Entry::Occupied(occupied) => {
@@ -82,7 +79,7 @@ where
                     mem::drop(guard);
 
                     let v = future.await?;
-                    self.update_store(pending_entries, sender, key, v.clone())
+                    self.update_store(sender, key, v.clone())
                         .await;
                     return Ok(v);
                 }
@@ -105,12 +102,11 @@ where
 
     async fn update_store(
         &self,
-        mut pending_entries: Lock<HashMap<K, watch::Receiver<Option<V>>>>,
         sender: watch::Sender<Option<V>>,
         key: K,
         value: V,
     ) {
-        let mut guard = pending_entries.lock().await;
+        let mut guard = self.pending_entries.lock().await;
         guard.remove(&key);
 
         let mut entries = {
