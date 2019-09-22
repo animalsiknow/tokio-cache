@@ -1,6 +1,6 @@
 [package]
 name = "tokio-cache"
-version = "0.2.0-alpha.0"
+version = "0.2.0-alpha.1"
 authors = ["Simon Génier <1782845+animalsiknow@users.noreply.github.com>"]
 edition = "2018"
 documentation = "https://docs.rs/crate/tokio-cache"
